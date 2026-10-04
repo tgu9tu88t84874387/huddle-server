@@ -1,0 +1,41 @@
+# Зависимости Node.js
+node_modules/
+
+# Локальная база данных сервера
+huddle-db.json
+
+# Переменные окружения
+.env
+.env.local
+.env.production
+
+# Логи
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Кэш
+.cache/
+.npm/
+.parcel-cache/
+
+# Сборки
+dist/
+build/
+out/
+
+# Системные файлы
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Редакторы
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Временные
+*.tmp
+*.bak
