@@ -1,3 +1,4 @@
+require('dotenv').config();
 'use strict';
 /* ═══════════════════════════════════════════════════════════════════
    Huddle Server (API + Signal)
