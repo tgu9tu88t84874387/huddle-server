@@ -22,7 +22,7 @@ const PORT = process.env.PORT || 8787;
 const JWT_SECRET = process.env.JWT_SECRET || 'huddle-secret-change-me';
 const DB_FILE = process.env.DB_FILE || path.join(__dirname, 'huddle-db.json');
 /* ─────────── БАЗА (JSON-файл) ─────────── */
-let DB = { users: {}, messages: {}, stories: [], posts: [], communities: [], channelPosts: {} };
+let DB = { users: {}, messages: {}, stories: [], posts: [], communities: [], channelPosts: {}, chats: [] };
 function loadDB() {
   try {
     if (fs.existsSync(DB_FILE)) {
@@ -34,7 +34,8 @@ function loadDB() {
       DB.posts = parsed.posts || [];
       DB.communities = parsed.communities || [];
       DB.channelPosts = parsed.channelPosts || {};
-      console.log('[DB] loaded:', DB_FILE, '| users:', Object.keys(DB.users).length);
+      DB.chats = parsed.chats || [];
+      console.log('[DB] loaded:', DB_FILE, '| users:', Object.keys(DB.users).length, '| chats:', (DB.chats || []).length);
     } else {
       console.log('[DB] new file will be created at', DB_FILE);
     }
@@ -69,6 +70,12 @@ app.use(cors({
 app.options('*', cors());
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
+
+/* ─────────── UPLOAD ─────────── */
+const upload = require('./src/upload');
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+app.use('/api/upload', upload.router);
+
 /* ─────────── AUTH ─────────── */
 function signToken(user) {
   return jwt.sign({ username: user.username }, JWT_SECRET, { expiresIn: '30d' });
@@ -462,6 +469,125 @@ app.post('/api/posts/:postId/comments', authOptional, (req, res) => {
   res.status(201).json({ ok: true, comment });
 });
 
+
+/* ─────────── CHATS / GROUPS ─────────── */
+if (!Array.isArray(DB.chats)) DB.chats = [];
+
+app.get('/api/chats', authMW, (req, res) => {
+  const me = req.user.username;
+  const list = (DB.chats || []).filter((c) => (c.members || []).includes(me));
+  res.json({ chats: list });
+});
+
+app.post('/api/chats', authMW, (req, res) => {
+  const me = req.user.username;
+  const type = String((req.body && req.body.type) || 'user').toLowerCase();
+  const name = String((req.body && req.body.name) || '').trim();
+  const description = String((req.body && req.body.description) || '').trim();
+  let members = Array.isArray(req.body && req.body.members) ? req.body.members : [];
+  members = members.map((m) => String(m || '').replace(/^@/, '').trim()).filter(Boolean);
+
+  if (type === 'group') {
+    if (name.length < 3) return res.status(400).json({ error: 'name min 3 chars' });
+    const chat = {
+      id: 'g_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+      type: 'group',
+      name,
+      description,
+      owner: me,
+      members: Array.from(new Set([me, ...members])),
+      private: !!(req.body && req.body.private),
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    DB.chats.unshift(chat);
+    DB.communities = DB.communities || [];
+    if (!DB.communities.some((c) => String(c.id) === String(chat.id))) {
+      DB.communities.unshift({
+        id: chat.id,
+        name: chat.name,
+        description: chat.description,
+        type: 'group',
+        owner: chat.owner,
+        members: chat.members.slice(),
+        private: chat.private,
+        created_at: chat.created_at,
+      });
+    }
+    saveDB();
+    return res.status(201).json({ chat, group: chat });
+  }
+
+  const other = String((req.body && (req.body.username || req.body.with)) || members[0] || '')
+    .replace(/^@/, '')
+    .trim();
+  if (!other) return res.status(400).json({ error: 'username required' });
+  if (other.toLowerCase() === me.toLowerCase()) {
+    return res.status(400).json({ error: 'cannot chat with yourself' });
+  }
+  if (!DB.users[other.toLowerCase()]) return res.status(404).json({ error: 'user not found' });
+
+  let chat = (DB.chats || []).find((c) => {
+    if (c.type && c.type !== 'user') return false;
+    const m = c.members || [];
+    return (
+      m.length === 2 &&
+      m.map((x) => String(x).toLowerCase()).includes(me.toLowerCase()) &&
+      m.map((x) => String(x).toLowerCase()).includes(other.toLowerCase())
+    );
+  });
+
+  if (!chat) {
+    chat = {
+      id: 'c_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+      type: 'user',
+      name: null,
+      members: [me, other],
+      owner: me,
+      private: true,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    DB.chats.unshift(chat);
+    saveDB();
+  }
+
+  res.status(201).json({ chat });
+});
+
+app.post('/api/groups/:id/members', authMW, (req, res) => {
+  const chat = (DB.chats || []).find(
+    (c) => String(c.id) === String(req.params.id) && c.type === 'group'
+  );
+  if (!chat) return res.status(404).json({ error: 'group not found' });
+
+  const username = String((req.body && req.body.username) || '').replace(/^@/, '').trim();
+  if (!username) return res.status(400).json({ error: 'username required' });
+  if (!DB.users[username.toLowerCase()]) return res.status(404).json({ error: 'user not found' });
+
+  chat.members = chat.members || [];
+  if (!chat.members.map((x) => String(x).toLowerCase()).includes(username.toLowerCase())) {
+    chat.members.push(username);
+    chat.updated_at = new Date().toISOString();
+  }
+
+  const comm = (DB.communities || []).find((c) => String(c.id) === String(chat.id));
+  if (comm) comm.members = chat.members.slice();
+
+  saveDB();
+  res.json({ chat });
+});
+
+app.get('/api/chats/:id', authMW, (req, res) => {
+  const chat = (DB.chats || []).find((c) => String(c.id) === String(req.params.id));
+  if (!chat) return res.status(404).json({ error: 'chat not found' });
+  const me = req.user.username;
+  if (!(chat.members || []).includes(me)) {
+    return res.status(403).json({ error: 'no access' });
+  }
+  res.json({ chat });
+});
+
 /* ═══════════════ HTTP + WEBSOCKET ═══════════════ */
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server, path: '/ws' });
@@ -656,6 +782,8 @@ server.listen(PORT, '0.0.0.0', () => {
   log('WS    : ws://localhost:' + PORT + '/ws');
   log('Users : ' + Object.keys(DB.users).length);
   log('Channel posts API: /api/channels/:id/posts , /api/posts');
+  log('Chats API: /api/chats , /api/groups/:id/members');
+  log('Upload API: /api/upload , static /uploads');
   log('');
   log('На хостинге используй:');
   log('  health: https://<домен>/health');
